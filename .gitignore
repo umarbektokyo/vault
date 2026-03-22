@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output
+frontend/dist/
+
+# Binary
+vault
+backend/vault
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+
+# Test
+coverage.out
+*.test
+
+# Content (user-provided, not part of the repo)
+contents/
