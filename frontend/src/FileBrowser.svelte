@@ -24,6 +24,28 @@
   let panelSections = $state(getCookie('panelSections', { system: true, info: true, details: true }));
   let previewFile = $state(null);
 
+  // Auth state
+  let authEnabled = $state(false);
+  let authenticated = $state(false);
+  let showLoginModal = $state(false);
+  let loginUser = $state('');
+  let loginPass = $state('');
+  let loginError = $state('');
+
+  // Upload state
+  let uploading = $state(false);
+
+  // Secret code state
+  let showSecretModal = $state(false);
+  let secretCode = $state('');
+  let secretTarget = $state(null); // entry to set secret on
+
+  // Unlock state
+  let showUnlockModal = $state(false);
+  let unlockCode = $state('');
+  let unlockTarget = $state(null); // entry to unlock
+  let unlockError = $state('');
+
   // Persist settings on change
   $effect(() => { setCookie('viewMode', viewMode); });
   $effect(() => { setCookie('showSidebar', showSidebar); });
@@ -79,6 +101,125 @@
       '  ' + d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
   }
 
+  // --- Auth ---
+  async function checkAuth() {
+    try {
+      const res = await fetch('/api/auth');
+      const data = await res.json();
+      authEnabled = data.authEnabled;
+      authenticated = data.authenticated;
+    } catch {}
+  }
+
+  async function doLogin() {
+    loginError = '';
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: loginUser, password: loginPass })
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        loginError = data.error || 'Login failed';
+        return;
+      }
+      authenticated = true;
+      showLoginModal = false;
+      loginUser = '';
+      loginPass = '';
+      browse(currentPath);
+    } catch {
+      loginError = 'Connection error';
+    }
+  }
+
+  async function doLogout() {
+    await fetch('/api/logout', { method: 'POST' });
+    authenticated = false;
+    browse(currentPath);
+  }
+
+  // --- Upload ---
+  function triggerUpload() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.onchange = async () => {
+      if (!input.files.length) return;
+      uploading = true;
+      for (const file of input.files) {
+        const form = new FormData();
+        form.append('file', file);
+        form.append('path', currentPath);
+        await fetch('/api/upload', { method: 'POST', body: form });
+      }
+      uploading = false;
+      browse(currentPath);
+    };
+    input.click();
+  }
+
+  // --- Secrets ---
+  function openSetSecret(entry) {
+    secretTarget = entry;
+    secretCode = '';
+    showSecretModal = true;
+  }
+
+  async function doSetSecret() {
+    if (!secretTarget) return;
+    await fetch('/api/secret', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: secretTarget.path, code: secretCode })
+    });
+    showSecretModal = false;
+    secretCode = '';
+    secretTarget = null;
+    browse(currentPath);
+  }
+
+  async function doRemoveSecret(entry) {
+    await fetch('/api/secret', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: entry.path, code: '' })
+    });
+    browse(currentPath);
+  }
+
+  function openUnlock(entry) {
+    unlockTarget = entry;
+    unlockCode = '';
+    unlockError = '';
+    showUnlockModal = true;
+  }
+
+  async function doUnlock() {
+    if (!unlockTarget) return;
+    unlockError = '';
+    const res = await fetch('/api/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: unlockTarget.path, code: unlockCode })
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      unlockError = data.error || 'Failed to unlock';
+      return;
+    }
+    showUnlockModal = false;
+    // Now open the file normally
+    const entry = unlockTarget;
+    unlockTarget = null;
+    unlockCode = '';
+    const type = getFileType(entry.ext);
+    if (type !== 'file') {
+      previewFile = { ...entry, type, url: `/files${entry.path}` };
+    }
+  }
+
   async function browse(path, pushHistory = true) {
     loading = true;
     error = null;
@@ -105,6 +246,8 @@
     selectedIndex = index;
     if (entry.isDir) {
       browse(entry.path);
+    } else if (entry.hasSecret && !authenticated) {
+      openUnlock(entry);
     } else {
       const type = getFileType(entry.ext);
       if (type !== 'file') {
@@ -115,7 +258,11 @@
 
   function handleEntryDblClick(entry) {
     if (!entry.isDir) {
-      window.open(`/files${entry.path}`, '_blank');
+      if (entry.hasSecret && !authenticated) {
+        openUnlock(entry);
+      } else {
+        window.open(`/files${entry.path}`, '_blank');
+      }
     }
   }
 
@@ -149,7 +296,11 @@
   }
 
   function downloadFile(entry, event) {
-    event.stopPropagation();
+    if (event) event.stopPropagation();
+    if (entry.hasSecret && !authenticated) {
+      openUnlock(entry);
+      return;
+    }
     const a = document.createElement('a');
     a.href = `/files${entry.path}`;
     a.download = entry.name;
@@ -157,7 +308,7 @@
   }
 
   function copyUrl(entry, event) {
-    event.stopPropagation();
+    if (event) event.stopPropagation();
     navigator.clipboard.writeText(`${window.location.origin}/files${entry.path}`);
   }
 
@@ -170,6 +321,7 @@
     return getFileType(entry.ext);
   }
 
+  checkAuth();
   browse(currentPath);
 </script>
 
@@ -185,6 +337,24 @@
         <span>File Browser</span>
         <svg width="8" height="8" viewBox="0 0 8 8"><path d="M2 3l2 2.5L6 3" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
+
+      <a class="bw icon-sq github-link" href="https://github.com/umarbektokyo/vault" target="_blank" rel="noopener noreferrer" title="GitHub">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+
+      {#if authEnabled}
+        {#if authenticated}
+          <button class="bw header-action-btn auth-btn" onclick={doLogout} title="Logout">
+            <svg width="11" height="11" viewBox="0 0 11 11"><path d="M4 1.5H2.5a1 1 0 00-1 1v6a1 1 0 001 1H4M7.5 7.5L9.5 5.5 7.5 3.5M9.5 5.5H4" stroke="currentColor" stroke-width="1" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>Logout</span>
+          </button>
+        {:else}
+          <button class="bw header-action-btn auth-btn" onclick={() => showLoginModal = true} title="Login">
+            <svg width="11" height="11" viewBox="0 0 11 11"><circle cx="5.5" cy="3.5" r="2" stroke="currentColor" stroke-width="1" fill="none"/><path d="M1.5 9.5c0-2.2 1.8-4 4-4s4 1.8 4 4" stroke="currentColor" stroke-width="1" fill="none" stroke-linecap="round"/></svg>
+            <span>Login</span>
+          </button>
+        {/if}
+      {/if}
 
       <div class="header-sep"></div>
 
@@ -215,6 +385,14 @@
     </div>
 
     <div class="header-right">
+      {#if authenticated}
+        <button class="bw header-action-btn" onclick={triggerUpload} disabled={uploading} title="Upload files">
+          <svg width="11" height="11" viewBox="0 0 11 11"><path d="M5.5 9V3.5M3 5.5l2.5-2.5L8 5.5M1.5 1h8" stroke="currentColor" stroke-width="1.1" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>{uploading ? 'Uploading...' : 'Upload'}</span>
+        </button>
+        <div class="header-sep"></div>
+      {/if}
+
       <div class="search-widget">
         <svg class="search-icon" width="11" height="11" viewBox="0 0 11 11"><circle cx="4.5" cy="4.5" r="3" stroke="currentColor" fill="none" stroke-width="1.2"/><path d="M7 7l3 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
         <input type="text" bind:value={filterText} placeholder="Filter" class="search-input" />
@@ -276,7 +454,14 @@
               tabindex="0"
             >
               <div class="lr-icon">
-                {@html fileIcon(getTypeLabel(entry), 16)}
+                {#if entry.hasSecret && !entry.isDir}
+                  <div class="lock-icon-wrap">
+                    {@html fileIcon(getTypeLabel(entry), 16)}
+                    <svg class="lock-badge" width="8" height="8" viewBox="0 0 10 10"><rect x="1" y="4.5" width="8" height="5" rx="1" fill="#e87d0d"/><path d="M3.5 4.5V3a1.5 1.5 0 013 0v1.5" stroke="#e87d0d" stroke-width="1.2" fill="none"/></svg>
+                  </div>
+                {:else}
+                  {@html fileIcon(getTypeLabel(entry), 16)}
+                {/if}
               </div>
               <div class="lr-name" class:is-dir={entry.isDir} title={entry.name}>{entry.name}</div>
               <div class="lr-size">{entry.isDir ? '' : formatSize(entry.size)}</div>
@@ -304,7 +489,12 @@
               ondblclick={() => handleEntryDblClick(entry)}
             >
               <div class="grid-thumb-wrap">
-                {#if getTypeLabel(entry) === 'image'}
+                {#if entry.hasSecret && !entry.isDir}
+                  <div class="grid-lock-overlay">
+                    <svg width="20" height="20" viewBox="0 0 10 10"><rect x="1" y="4.5" width="8" height="5" rx="1" fill="#e87d0d"/><path d="M3.5 4.5V3a1.5 1.5 0 013 0v1.5" stroke="#e87d0d" stroke-width="1.2" fill="none"/></svg>
+                  </div>
+                {/if}
+                {#if getTypeLabel(entry) === 'image' && !entry.hasSecret}
                   <img src={`/files${entry.path}`} alt="" class="grid-thumb-img" loading="lazy" />
                 {:else}
                   <div class="grid-thumb-icon">{@html fileIcon(getTypeLabel(entry), 36)}</div>
@@ -408,7 +598,7 @@
               {#if selectedEntry}
                 {@const sel = selectedEntry}
                 <!-- Thumbnail preview for images -->
-                {#if getTypeLabel(sel) === 'image'}
+                {#if getTypeLabel(sel) === 'image' && !sel.hasSecret}
                   <div class="detail-thumb">
                     <img src={`/files${sel.path}`} alt={sel.name} loading="lazy" />
                   </div>
@@ -454,7 +644,29 @@
                       Save file
                     </button>
                   {/if}
+
+                  {#if !sel.isDir && sel.hasSecret}
+                    <span class="prop-label">Secret</span>
+                    <span class="prop-value" style="color: #e87d0d;">Protected</span>
+                  {/if}
                 </div>
+
+                <!-- Secret code management (auth only) -->
+                {#if authenticated && !sel.isDir}
+                  <div class="secret-actions">
+                    {#if sel.hasSecret}
+                      <button class="prop-link secret-btn" onclick={() => doRemoveSecret(sel)}>
+                        <svg width="9" height="9" viewBox="0 0 10 10"><rect x="1" y="4.5" width="8" height="5" rx="1" stroke="#e87d0d" stroke-width="0.8" fill="none"/><path d="M3.5 4.5V3a1.5 1.5 0 013 0v1.5" stroke="#e87d0d" stroke-width="0.8" fill="none"/><path d="M2 2l6 6" stroke="#c44235" stroke-width="1" stroke-linecap="round"/></svg>
+                        Remove secret
+                      </button>
+                    {:else}
+                      <button class="prop-link secret-btn" onclick={() => openSetSecret(sel)}>
+                        <svg width="9" height="9" viewBox="0 0 10 10"><rect x="1" y="4.5" width="8" height="5" rx="1" stroke="#e87d0d" stroke-width="0.8" fill="none"/><path d="M3.5 4.5V3a1.5 1.5 0 013 0v1.5" stroke="#e87d0d" stroke-width="0.8" fill="none"/></svg>
+                        Set secret code
+                      </button>
+                    {/if}
+                  </div>
+                {/if}
               {:else}
                 <!-- Nothing selected: show overview -->
                 <div class="detail-empty-hint">
@@ -501,6 +713,86 @@
     <span class="sb-path">{currentPath}</span>
   </div>
 </div>
+
+<!-- ===== LOGIN MODAL ===== -->
+{#if showLoginModal}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={() => showLoginModal = false} onkeydown={(e) => e.key === 'Escape' && (showLoginModal = false)}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+      <div class="modal-header">
+        <span>Login to Vault</span>
+        <button class="bw icon-sq modal-close" onclick={() => showLoginModal = false}>
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form onsubmit={(e) => { e.preventDefault(); doLogin(); }}>
+          <label class="modal-label">Username</label>
+          <input class="modal-input" type="text" bind:value={loginUser} autocomplete="username" />
+          <label class="modal-label">Password</label>
+          <input class="modal-input" type="password" bind:value={loginPass} autocomplete="current-password" />
+          {#if loginError}
+            <div class="modal-error">{loginError}</div>
+          {/if}
+          <button class="bw modal-submit" type="submit">Login</button>
+        </form>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ===== SET SECRET MODAL ===== -->
+{#if showSecretModal}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={() => showSecretModal = false} onkeydown={(e) => e.key === 'Escape' && (showSecretModal = false)}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+      <div class="modal-header">
+        <span>Set Secret Code</span>
+        <button class="bw icon-sq modal-close" onclick={() => showSecretModal = false}>
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form onsubmit={(e) => { e.preventDefault(); doSetSecret(); }}>
+          <div class="modal-file-name">{secretTarget?.name}</div>
+          <label class="modal-label">Secret Code</label>
+          <input class="modal-input" type="password" bind:value={secretCode} placeholder="Enter a secret code" />
+          <button class="bw modal-submit" type="submit" disabled={!secretCode}>Set Code</button>
+        </form>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ===== UNLOCK MODAL ===== -->
+{#if showUnlockModal}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={() => showUnlockModal = false} onkeydown={(e) => e.key === 'Escape' && (showUnlockModal = false)}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+      <div class="modal-header">
+        <svg width="14" height="14" viewBox="0 0 10 10"><rect x="1" y="4.5" width="8" height="5" rx="1" fill="#e87d0d"/><path d="M3.5 4.5V3a1.5 1.5 0 013 0v1.5" stroke="#e87d0d" stroke-width="1.2" fill="none"/></svg>
+        <span>Unlock File</span>
+        <button class="bw icon-sq modal-close" onclick={() => showUnlockModal = false}>
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form onsubmit={(e) => { e.preventDefault(); doUnlock(); }}>
+          <div class="modal-file-name">{unlockTarget?.name}</div>
+          <label class="modal-label">Enter the secret code to access this file</label>
+          <input class="modal-input" type="password" bind:value={unlockCode} placeholder="Secret code" />
+          {#if unlockError}
+            <div class="modal-error">{unlockError}</div>
+          {/if}
+          <button class="bw modal-submit" type="submit" disabled={!unlockCode}>Unlock</button>
+        </form>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <script context="module">
   function fileIcon(type, size) {
@@ -562,6 +854,31 @@
     font-weight: 500;
     height: 22px;
     white-space: nowrap;
+  }
+
+  .header-action-btn {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    font-size: 10.5px;
+    height: 22px;
+    white-space: nowrap;
+  }
+
+  .auth-btn {
+    font-size: 10px;
+  }
+
+  .github-link {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+    color: #999;
+  }
+  .github-link:hover {
+    color: #e6e6e6;
   }
 
   .icon-sq {
@@ -755,6 +1072,19 @@
   }
   .micro-btn:hover { color: #e87d0d; background: #3a3a3a; }
 
+  /* Lock icon */
+  .lock-icon-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .lock-badge {
+    position: absolute;
+    bottom: -2px;
+    right: -3px;
+  }
+
   /* ===== GRID VIEW ===== */
   .grid-body {
     flex: 1;
@@ -790,6 +1120,19 @@
     border-radius: 5px;
     overflow: hidden;
     background: #222;
+    position: relative;
+  }
+  .grid-lock-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.4);
+    z-index: 1;
   }
   .grid-thumb-img {
     width: 100%;
@@ -911,8 +1254,24 @@
     font-size: 10px;
     padding: 1px 6px;
     box-shadow: 0 1px 0 0 #2a2a2a, inset 0 1px 0 0 #555;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
   }
   .prop-link:hover { background: #505050; color: #9cc5f0; }
+
+  /* Secret actions in sidebar */
+  .secret-actions {
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px solid #2e2e2e;
+  }
+  .secret-btn {
+    color: #e87d0d !important;
+  }
+  .secret-btn:hover {
+    color: #f09030 !important;
+  }
 
   /* ===== STATUS BAR ===== */
   .status-bar {
@@ -1045,4 +1404,90 @@
   .badge-text { background: #2e2e2e; color: #999; }
   .badge-video { background: #2e1e3a; color: #9b59b6; }
   .badge-audio { background: #1a2e22; color: #27ae60; }
+
+  /* ===== MODALS ===== */
+  .modal-backdrop {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+  .modal {
+    background: #3a3a3a;
+    border-radius: 8px;
+    width: 300px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5), 0 0 0 1px #555;
+    overflow: hidden;
+  }
+  .modal-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    background: #444;
+    font-size: 12px;
+    font-weight: 500;
+    color: #e6e6e6;
+    border-bottom: 1px solid #333;
+  }
+  .modal-close {
+    margin-left: auto;
+  }
+  .modal-body {
+    padding: 12px 14px 14px;
+  }
+  .modal-label {
+    display: block;
+    font-size: 10px;
+    color: #999;
+    margin-bottom: 3px;
+    margin-top: 8px;
+  }
+  .modal-label:first-child,
+  .modal-file-name + .modal-label {
+    margin-top: 0;
+  }
+  .modal-input {
+    width: 100%;
+    padding: 5px 8px;
+    background: #1e1e1e;
+    border: none;
+    border-radius: 5px;
+    color: #e6e6e6;
+    font-size: 12px;
+    font-family: 'Inter', sans-serif;
+    outline: none;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.4);
+  }
+  .modal-input:focus {
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.4), 0 0 0 1px #4b76c2;
+  }
+  .modal-error {
+    color: #c44235;
+    font-size: 10px;
+    margin-top: 6px;
+  }
+  .modal-submit {
+    margin-top: 12px;
+    width: 100%;
+    padding: 6px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .modal-file-name {
+    font-size: 11px;
+    color: #d0d0d0;
+    padding: 4px 0 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border-bottom: 1px solid #333;
+    margin-bottom: 4px;
+  }
 </style>

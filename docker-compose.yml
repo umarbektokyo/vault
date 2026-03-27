@@ -4,7 +4,13 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./contents:/contents:ro
+      - ./contents:/contents
     environment:
       - PORT=8080
+      # Set these to enable authentication, uploads, and secret code management.
+      # Remove or leave empty to run in public read-only mode.
+      - VAULT_USER=admin
+      - VAULT_PASS=changeme
+      # Optional: override the HMAC signing key for cookies (auto-derived from VAULT_PASS if not set)
+      # - VAULT_SECRET=your-signing-key
     restart: unless-stopped

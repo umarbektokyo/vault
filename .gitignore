@@ -27,5 +27,8 @@ Thumbs.db
 coverage.out
 *.test
 
+# Secrets metadata (created at runtime in CONTENT_ROOT)
+.vault-secrets.json
+
 # Content (user-provided, not part of the repo)
 contents/
