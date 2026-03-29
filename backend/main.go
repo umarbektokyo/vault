@@ -117,6 +117,43 @@ func (s *SecretsStore) HasSecret(path string) bool {
 	return ok
 }
 
+func (s *SecretsStore) RenamePath(oldPath, newPath string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	updated := false
+	for k, v := range s.codes {
+		if k == oldPath {
+			delete(s.codes, k)
+			s.codes[newPath] = v
+			updated = true
+		} else if strings.HasPrefix(k, oldPath+"/") {
+			delete(s.codes, k)
+			s.codes[newPath+k[len(oldPath):]] = v
+			updated = true
+		}
+	}
+	if updated {
+		return s.save()
+	}
+	return nil
+}
+
+func (s *SecretsStore) DeletePath(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	updated := false
+	for k := range s.codes {
+		if k == path || strings.HasPrefix(k, path+"/") {
+			delete(s.codes, k)
+			updated = true
+		}
+	}
+	if updated {
+		return s.save()
+	}
+	return nil
+}
+
 func main() {
 	contentRoot := "/contents"
 	if v := os.Getenv("CONTENT_ROOT"); v != "" {
@@ -186,6 +223,10 @@ func newMux(cfg Config) *http.ServeMux {
 	mux.HandleFunc("/api/login", handleLogin(cfg))
 	mux.HandleFunc("/api/logout", handleLogout())
 	mux.HandleFunc("/api/upload", requireAuth(cfg, handleUpload(absContentRoot)))
+	mux.HandleFunc("/api/mkdir", requireAuth(cfg, handleMkdir(absContentRoot)))
+	mux.HandleFunc("/api/rename", requireAuth(cfg, handleRename(absContentRoot, secrets)))
+	mux.HandleFunc("/api/move", requireAuth(cfg, handleMove(absContentRoot, secrets)))
+	mux.HandleFunc("/api/delete", requireAuth(cfg, handleDelete(absContentRoot, secrets)))
 	mux.HandleFunc("/api/secret", requireAuth(cfg, handleSecret(absContentRoot, secrets)))
 	mux.HandleFunc("/api/unlock", handleUnlock(absContentRoot, secrets, cfg))
 
@@ -422,6 +463,182 @@ func handleUpload(absContentRoot string) http.HandlerFunc {
 			"name": filename,
 			"path": filepath.Join(targetDir, filename),
 		})
+	}
+}
+
+func handleMkdir(absContentRoot string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
+			return
+		}
+		var req struct {
+			Path string `json:"path"`
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request"})
+			return
+		}
+		parentDir := filepath.Clean("/" + req.Path)
+		name := filepath.Base(req.Name)
+		if name == "." || name == ".." || strings.HasPrefix(name, ".") || strings.Contains(req.Name, "/") {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid folder name"})
+			return
+		}
+		absDir := filepath.Join(absContentRoot, parentDir, name)
+		if !strings.HasPrefix(absDir, absContentRoot) {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid path"})
+			return
+		}
+		if _, err := os.Stat(absDir); err == nil {
+			writeJSON(w, http.StatusConflict, ErrorResponse{Error: "a file or folder with that name already exists"})
+			return
+		}
+		if err := os.Mkdir(absDir, 0755); err != nil {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "failed to create directory"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"path": filepath.Join(parentDir, name)})
+	}
+}
+
+func handleRename(absContentRoot string, secrets *SecretsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
+			return
+		}
+		var req struct {
+			Path    string `json:"path"`
+			NewName string `json:"newName"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request"})
+			return
+		}
+		cleanPath := filepath.Clean("/" + req.Path)
+		if cleanPath == "/" {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "cannot rename root"})
+			return
+		}
+		newName := filepath.Base(req.NewName)
+		if newName == "." || newName == ".." || strings.HasPrefix(newName, ".") || strings.Contains(newName, "/") {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid name"})
+			return
+		}
+		oldAbs := filepath.Join(absContentRoot, cleanPath)
+		if !strings.HasPrefix(oldAbs, absContentRoot) {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid path"})
+			return
+		}
+		if _, err := os.Stat(oldAbs); os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "not found"})
+			return
+		}
+		newAbs := filepath.Join(filepath.Dir(oldAbs), newName)
+		if _, err := os.Stat(newAbs); err == nil {
+			writeJSON(w, http.StatusConflict, ErrorResponse{Error: "a file or folder with that name already exists"})
+			return
+		}
+		if err := os.Rename(oldAbs, newAbs); err != nil {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "rename failed"})
+			return
+		}
+		newCleanPath := filepath.Join(filepath.Dir(cleanPath), newName)
+		secrets.RenamePath(cleanPath, newCleanPath)
+		writeJSON(w, http.StatusOK, map[string]string{"newPath": newCleanPath})
+	}
+}
+
+func handleMove(absContentRoot string, secrets *SecretsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
+			return
+		}
+		var req struct {
+			Path string `json:"path"`
+			Dest string `json:"dest"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request"})
+			return
+		}
+		cleanPath := filepath.Clean("/" + req.Path)
+		if cleanPath == "/" {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "cannot move root"})
+			return
+		}
+		destDir := filepath.Clean("/" + req.Dest)
+		oldAbs := filepath.Join(absContentRoot, cleanPath)
+		destAbs := filepath.Join(absContentRoot, destDir)
+		if !strings.HasPrefix(oldAbs, absContentRoot) || !strings.HasPrefix(destAbs, absContentRoot) {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid path"})
+			return
+		}
+		if _, err := os.Stat(oldAbs); os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "source not found"})
+			return
+		}
+		info, err := os.Stat(destAbs)
+		if err != nil || !info.IsDir() {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "destination directory does not exist"})
+			return
+		}
+		name := filepath.Base(cleanPath)
+		newAbs := filepath.Join(destAbs, name)
+		if _, err := os.Stat(newAbs); err == nil {
+			writeJSON(w, http.StatusConflict, ErrorResponse{Error: "a file or folder with that name already exists in the destination"})
+			return
+		}
+		if err := os.Rename(oldAbs, newAbs); err != nil {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "move failed"})
+			return
+		}
+		newCleanPath := filepath.Join(destDir, name)
+		secrets.RenamePath(cleanPath, newCleanPath)
+		writeJSON(w, http.StatusOK, map[string]string{"newPath": newCleanPath})
+	}
+}
+
+func handleDelete(absContentRoot string, secrets *SecretsStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost {
+			writeJSON(w, http.StatusMethodNotAllowed, ErrorResponse{Error: "method not allowed"})
+			return
+		}
+		var req struct {
+			Path string `json:"path"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid request"})
+			return
+		}
+		cleanPath := filepath.Clean("/" + req.Path)
+		if cleanPath == "/" {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "cannot delete root"})
+			return
+		}
+		absPath := filepath.Join(absContentRoot, cleanPath)
+		if !strings.HasPrefix(absPath, absContentRoot) {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "invalid path"})
+			return
+		}
+		if _, err := os.Stat(absPath); os.IsNotExist(err) {
+			writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "not found"})
+			return
+		}
+		if err := os.RemoveAll(absPath); err != nil {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "delete failed"})
+			return
+		}
+		secrets.DeletePath(cleanPath)
+		writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 	}
 }
 

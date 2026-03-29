@@ -46,6 +46,27 @@
   let unlockTarget = $state(null); // entry to unlock
   let unlockError = $state('');
 
+  // Mkdir state
+  let showMkdirModal = $state(false);
+  let mkdirName = $state('');
+  let mkdirError = $state('');
+
+  // Rename state
+  let showRenameModal = $state(false);
+  let renameTarget = $state(null);
+  let renameName = $state('');
+  let renameError = $state('');
+
+  // Move state
+  let showMoveModal = $state(false);
+  let moveTarget = $state(null);
+  let moveDest = $state('/');
+  let moveError = $state('');
+
+  // Delete state
+  let showDeleteModal = $state(false);
+  let deleteTarget = $state(null);
+
   // Persist settings on change
   $effect(() => { setCookie('viewMode', viewMode); });
   $effect(() => { setCookie('showSidebar', showSidebar); });
@@ -186,6 +207,107 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: entry.path, code: '' })
     });
+    browse(currentPath);
+  }
+
+  // --- Mkdir ---
+  function openMkdir() {
+    mkdirName = '';
+    mkdirError = '';
+    showMkdirModal = true;
+  }
+
+  async function doMkdir() {
+    if (!mkdirName.trim()) return;
+    mkdirError = '';
+    const res = await fetch('/api/mkdir', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: currentPath, name: mkdirName.trim() })
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      mkdirError = data.error || 'Failed to create folder';
+      return;
+    }
+    showMkdirModal = false;
+    mkdirName = '';
+    browse(currentPath);
+  }
+
+  // --- Rename ---
+  function openRename(entry) {
+    renameTarget = entry;
+    renameName = entry.name;
+    renameError = '';
+    showRenameModal = true;
+  }
+
+  async function doRename() {
+    if (!renameTarget || !renameName.trim()) return;
+    renameError = '';
+    const res = await fetch('/api/rename', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: renameTarget.path, newName: renameName.trim() })
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      renameError = data.error || 'Rename failed';
+      return;
+    }
+    showRenameModal = false;
+    renameTarget = null;
+    renameName = '';
+    selectedIndex = -1;
+    browse(currentPath);
+  }
+
+  // --- Move ---
+  function openMove(entry) {
+    moveTarget = entry;
+    moveDest = currentPath === '/' ? '/' : currentPath;
+    moveError = '';
+    showMoveModal = true;
+  }
+
+  async function doMove() {
+    if (!moveTarget || !moveDest.trim()) return;
+    moveError = '';
+    const res = await fetch('/api/move', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: moveTarget.path, dest: moveDest.trim() })
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      moveError = data.error || 'Move failed';
+      return;
+    }
+    showMoveModal = false;
+    moveTarget = null;
+    moveDest = '/';
+    selectedIndex = -1;
+    browse(currentPath);
+  }
+
+  // --- Delete ---
+  function openDelete(entry) {
+    deleteTarget = entry;
+    showDeleteModal = true;
+  }
+
+  async function doDelete() {
+    if (!deleteTarget) return;
+    const res = await fetch('/api/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: deleteTarget.path })
+    });
+    if (!res.ok) return;
+    showDeleteModal = false;
+    deleteTarget = null;
+    selectedIndex = -1;
     browse(currentPath);
   }
 
@@ -386,6 +508,10 @@
 
     <div class="header-right">
       {#if authenticated}
+        <button class="bw header-action-btn" onclick={openMkdir} title="New Folder">
+          <svg width="11" height="11" viewBox="0 0 11 11"><path d="M1.5 2.5h3l1.5 1.5h3.5v5h-8z" stroke="currentColor" stroke-width="0.9" fill="none" stroke-linejoin="round"/><path d="M5.5 5v3M4 6.5h3" stroke="currentColor" stroke-width="0.9" stroke-linecap="round"/></svg>
+          <span>New Folder</span>
+        </button>
         <button class="bw header-action-btn" onclick={triggerUpload} disabled={uploading} title="Upload files">
           <svg width="11" height="11" viewBox="0 0 11 11"><path d="M5.5 9V3.5M3 5.5l2.5-2.5L8 5.5M1.5 1h8" stroke="currentColor" stroke-width="1.1" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
           <span>{uploading ? 'Uploading...' : 'Upload'}</span>
@@ -667,6 +793,24 @@
                     {/if}
                   </div>
                 {/if}
+
+                <!-- File management actions (auth only) -->
+                {#if authenticated}
+                  <div class="secret-actions">
+                    <button class="prop-link" onclick={() => openRename(sel)}>
+                      <svg width="9" height="9" viewBox="0 0 10 10"><path d="M1 8.5h2.5l5-5a1 1 0 00-1.5-1.5l-5 5V8.5z" stroke="currentColor" stroke-width="0.8" fill="none"/></svg>
+                      Rename
+                    </button>
+                    <button class="prop-link" onclick={() => openMove(sel)}>
+                      <svg width="9" height="9" viewBox="0 0 10 10"><path d="M1 5h7M6 3l2 2-2 2" stroke="currentColor" stroke-width="0.9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                      Move
+                    </button>
+                    <button class="prop-link" style="color: #c44235;" onclick={() => openDelete(sel)}>
+                      <svg width="9" height="9" viewBox="0 0 10 10"><path d="M2 3h6M3.5 3V2h3v1M3.5 3v5.5h3V3" stroke="#c44235" stroke-width="0.8" fill="none" stroke-linejoin="round"/></svg>
+                      Delete
+                    </button>
+                  </div>
+                {/if}
               {:else}
                 <!-- Nothing selected: show overview -->
                 <div class="detail-empty-hint">
@@ -788,6 +932,109 @@
             <div class="modal-error">{unlockError}</div>
           {/if}
           <button class="bw modal-submit" type="submit" disabled={!unlockCode}>Unlock</button>
+        </form>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ===== RENAME MODAL ===== -->
+{#if showRenameModal}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={() => showRenameModal = false} onkeydown={(e) => e.key === 'Escape' && (showRenameModal = false)}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+      <div class="modal-header">
+        <span>Rename</span>
+        <button class="bw icon-sq modal-close" onclick={() => showRenameModal = false}>
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form onsubmit={(e) => { e.preventDefault(); doRename(); }}>
+          <div class="modal-file-name">{renameTarget?.name}</div>
+          <label class="modal-label">New Name</label>
+          <input class="modal-input" type="text" bind:value={renameName} />
+          {#if renameError}
+            <div class="modal-error">{renameError}</div>
+          {/if}
+          <button class="bw modal-submit" type="submit" disabled={!renameName.trim() || renameName === renameTarget?.name}>Rename</button>
+        </form>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ===== MOVE MODAL ===== -->
+{#if showMoveModal}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={() => showMoveModal = false} onkeydown={(e) => e.key === 'Escape' && (showMoveModal = false)}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+      <div class="modal-header">
+        <span>Move</span>
+        <button class="bw icon-sq modal-close" onclick={() => showMoveModal = false}>
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form onsubmit={(e) => { e.preventDefault(); doMove(); }}>
+          <div class="modal-file-name">{moveTarget?.name}</div>
+          <label class="modal-label">Destination folder path</label>
+          <input class="modal-input" type="text" bind:value={moveDest} placeholder="/" />
+          {#if moveError}
+            <div class="modal-error">{moveError}</div>
+          {/if}
+          <button class="bw modal-submit" type="submit" disabled={!moveDest.trim()}>Move</button>
+        </form>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ===== DELETE MODAL ===== -->
+{#if showDeleteModal}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={() => showDeleteModal = false} onkeydown={(e) => e.key === 'Escape' && (showDeleteModal = false)}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+      <div class="modal-header">
+        <span>Delete</span>
+        <button class="bw icon-sq modal-close" onclick={() => showDeleteModal = false}>
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size: 11px; color: #ccc; margin: 0 0 10px;">Are you sure you want to delete <strong>{deleteTarget?.name}</strong>{deleteTarget?.isDir ? ' and all its contents' : ''}? This cannot be undone.</p>
+        <div style="display: flex; gap: 6px; justify-content: flex-end;">
+          <button class="bw modal-submit" style="background: #333;" onclick={() => showDeleteModal = false}>Cancel</button>
+          <button class="bw modal-submit" style="background: #c44235;" onclick={doDelete}>Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ===== NEW FOLDER MODAL ===== -->
+{#if showMkdirModal}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-backdrop" onclick={() => showMkdirModal = false} onkeydown={(e) => e.key === 'Escape' && (showMkdirModal = false)}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="modal" onclick={(e) => e.stopPropagation()} onkeydown={() => {}}>
+      <div class="modal-header">
+        <span>New Folder</span>
+        <button class="bw icon-sq modal-close" onclick={() => showMkdirModal = false}>
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+        </button>
+      </div>
+      <div class="modal-body">
+        <form onsubmit={(e) => { e.preventDefault(); doMkdir(); }}>
+          <label class="modal-label">Folder Name</label>
+          <input class="modal-input" type="text" bind:value={mkdirName} placeholder="New folder" />
+          {#if mkdirError}
+            <div class="modal-error">{mkdirError}</div>
+          {/if}
+          <button class="bw modal-submit" type="submit" disabled={!mkdirName.trim()}>Create</button>
         </form>
       </div>
     </div>
@@ -1489,5 +1736,11 @@
     white-space: nowrap;
     border-bottom: 1px solid #333;
     margin-bottom: 4px;
+  }
+
+  /* Hide GitHub and auth buttons on mobile */
+  @media (max-width: 640px) {
+    .github-link { display: none !important; }
+    .auth-btn { display: none !important; }
   }
 </style>
